@@ -1,147 +1,85 @@
-import asyncio
 import logging
 
-from aiogram import Bot, types
-from aiogram.utils import executor
-from aiogram.dispatcher import Dispatcher
-from aiogram.types.message import ContentType
-from aiogram.utils.markdown import text, bold, italic, code, pre
-from aiogram.types import ParseMode, InputMediaPhoto, InputMediaVideo, ChatActions
-import csv
-import pymorphy2
-morph = pymorphy2.MorphAnalyzer()
+from aiogram import Bot, Dispatcher, executor, types
+from database import initialize_db
+initialize_db()
 
-import re
-import psycopg2
-import sklearn
-import numpy as np
+from models.user import User
 
+API_TOKEN = '6066037597:AAGVuYIkXZYm7Bx_a5GzVpQCmd2mtYcqFZ0'
 
-morph = pymorphy2.MorphAnalyzer(lang='ru')
+logging.basicConfig(level=logging.INFO)
 
-from config import TOKEN
-
-logging.basicConfig(
-    format=u'%(filename)s [ LINE:%(lineno)+3s ]#%(levelname)+8s [%(asctime)s]  %(message)s',
-    level=logging.INFO
-)
-
-
-bot = Bot(token=TOKEN)
+bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-  
+
 @dp.message_handler(commands=['start'])
-async def process_start_command(message: types.Message):
+async def send_welcome(message: types.Message):
+    User.first_or_create(telegram_id=message.chat.id)
     await message.reply(
-        'Привет!\nИспользуй команду /help, чтобы узнать список доступных команд!'
+        "Привет! Используй команду /help, чтобы узнать список доступных команд!"
     )
 
+@dp.message_handler(commands=['user'])
+async def echo(message: types.Message):
+    user = User.first_or_create(telegram_id=message.chat.id)
+    await message.answer(f'Ваш telegram_id = {user.telegram_id}, status = {user.status}')
 
-@dp.message_handler(commands=['help'])
-async def process_help_command(message: types.Message):
-    msg = text(
-        bold('Я могу ответить на следующие команды:'),
-        '/help', '/ask', '/psychologist', '/stop', sep='\n'
-    )
-    await message.reply(msg, parse_mode=ParseMode.MARKDOWN)
+@dp.message_handler(commands=['set_age'])
+async def set_age(message: types.Message):
+    user = User.first_or_create(telegram_id=message.chat.id)
+    user.status = 'setting_age'
+    user.save()
+    await message.answer(f'Введите ваш возраст')
 
+@dp.message_handler(commands=['find_an_interlocutor'])
+async def set_age(message: types.Message):
+    user = User.first_or_create(telegram_id=message.chat.id)
+    if user.age == None:
+      await message.answer(f'Нужно указать возраст чтобы воспользоваться данной функцией')
+      return
+
+    user.status = 'finding'
+    user.save()
+    await message.answer(f'Мы начали искать вам собеседника')
+    opponent = User.where(
+        'status', '=', 'finding'
+        ).where(
+          'telegram_id', '!=', user.telegram_id
+        ).where(
+          'age', '=', user.age
+        ).order_by('random()').first()
+
+    if opponent != None:
+        user.opponent_id = opponent.telegram_id
+        user.save()
+        opponent.opponent_id = user.telegram_id
+        opponent.save()
+        await message.answer(f'Мы нашли вам собеседника, перейдите в /chat')
+        await bot.send_message(opponent.telegram_id, 'Мы нашли вам собеседника, перейдите в /chat')
+
+@dp.message_handler(commands=['chat'])
+async def set_chatting(message: types.Message):
+    user = User.first_or_create(telegram_id=message.chat.id)
+    user.status = 'chatting'
+    user.save()
+
+@dp.message_handler(commands=['stop'])
+async def set_age(message: types.Message):
+    user = User.first_or_create(telegram_id=message.chat.id)
+    user.status = None
+    user.save()
+
+@dp.message_handler()
+async def message_handl(message: types.Message):
+      user = User.first_or_create(telegram_id=message.chat.id)
+      if user.status == 'setting_age':
+          user.age = int(message.text)
+          user.save()
+          await message.answer(f'Возраст проставлен в {user.age}')
+      if user.status == 'chatting':
+          await bot.send_message(user.opponent_id, message.text)
 
 if __name__ == '__main__':
-    executor.start_polling(dp)
-
-btn = types.InlineKeyboardButton(text='Нажми на меня', url='')
-
-
-conn = psycopg2.connect(dbname='energy', user='mao', password='darin', host='localhost')
-cursor = conn.cursor()
-
-morph = pymorphy2.MorphAnalyzer(lang='ru')
-
-answer_id=[]
-answer = dict()
-
-cursor.execute('SELECT id, answer FROM app.chats_answer;')
-records = cursor.fetchall()
-for row in records:
-    answer[row[1]]=row[1]
-
-questions=[] 
-
-cursor.execute('SELECT question, answer_id FROM app.chats_question;')
-records = cursor.fetchall()
-
-transform=0
-
-for row in records:
-    if row[1]>0:
-        phrases=row[0]
-        words=phrases.split(' ')
-        phrase=""
-
-        for word in words:
-            word = morph.parse(word)[0].normal_form
-
-        phrase = phrase + word + " "
-
-        if (len(phrase) > 0):
-            questions.append(phrase.strip())
-            answer_id.append(row[1])
-            transform = transform + 1
-
-print (questions)
-print (answer)
-print (answer_id)
-
-cursor.close()
-conn.close()
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
-
-vectorizer_q = TfidfVectorizer()
-vectorizer_q.fit(questions)
-matrix_big_q = vectorizer_q.transform(questions)
-print("Размер матрицы: ")
-print(matrix_big_q.shape)
-
-if transform > 200:
-    transform = 200
-
-svd_q = TruncatedSVD(n_components=transform)
-svd_q.fit(matrix_big_q)
-
-
-matrix_small_q = svd_q.transform(matrix_big_q)
-
-print ("Коэффициент уменьшения матрицы: ")
-print ( svd_q.explained_variance_ratio_.sum())
-
-from sklearn.neighbors import BallTree
-from sklearn.base import BaseEstimator
-
-def softmax(x):
-    proba = np.exp(-x)
-    return proba / sum(proba)
-
-class NeighborSampler(BaseEstimator):
-    def __init__(self, k=5, temperature=10.0):
-        self.k=k
-        self.temperature = temperature
-    def fit(self, X, y):
-        self.tree_ = BallTree(X)
-        self.y_ = np.array(y)
-    def predict(self, X, random_state=None):
-        distances, indices = self.tree_.query(X, return_distance=True, k=self.k)
-        result = []
-        for distance, index in zip(distances, indices):
-            result.append(np.random.choice(index, p=softmax(distance * self.temperature)))
-        return self.y_[result]
-
-from sklearn.pipeline import make_pipeline
-
-ns_q = NeighborSampler()
-
-
-ns_q.fit(matrix_small_q, answer_id) 
-pipe_q = make_pipeline(vectorizer_q, svd_q, ns_q)
+    executor.start_polling(dp, skip_updates=True)
